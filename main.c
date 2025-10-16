@@ -81,6 +81,11 @@ int main(int argc, char *argv[]) {
     ui.margin = 10;
 
     ui.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_type_hint(GTK_WINDOW(ui.window), GDK_WINDOW_TYPE_HINT_DOCK); // janela tipo dock (acima das apps)
+    gtk_window_stick(GTK_WINDOW(ui.window));        // fica em todas as workspaces
+    gtk_window_set_accept_focus(GTK_WINDOW(ui.window), FALSE);
+    gtk_window_set_focus_on_map(GTK_WINDOW(ui.window), FALSE);
+    gtk_widget_set_can_focus(ui.window, FALSE);
     gtk_window_set_title(GTK_WINDOW(ui.window), "Monitoring HUD");
     gtk_window_set_decorated(GTK_WINDOW(ui.window), FALSE);
     gtk_window_set_keep_above(GTK_WINDOW(ui.window), TRUE);
