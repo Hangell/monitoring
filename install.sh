@@ -1,172 +1,54 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ===== Config =====
 USER_HOME="${HOME}"
 BIN_DIR="${USER_HOME}/bin"
-SRC_DIR="$(mktemp -d)"
 AUTOSTART_DIR="${USER_HOME}/.config/autostart"
 BIN_PATH="${BIN_DIR}/monitoring"
 DESKTOP_PATH="${AUTOSTART_DIR}/monitoring.desktop"
+SRC_FILE="${1:-./monitoring_hud.c}"   # passe o caminho do seu .c como argumento (ou deixe ./monitoring_hud.c)
 
-echo "[*] Preparing environment..."
+# Temp dir com cleanup
+SRC_DIR="$(mktemp -d)"
+cleanup() { rm -rf "${SRC_DIR}"; }
+trap cleanup EXIT
+
+echo "[*] Preparando ambiente..."
 mkdir -p "${BIN_DIR}" "${AUTOSTART_DIR}"
 
 if ! command -v gcc >/dev/null 2>&1; then
-  echo "[*] Installing build tools (requires sudo)..."
+  echo "[*] Instalando build tools (sudo)..."
   sudo apt update
   sudo apt install -y build-essential
 fi
 
 if ! pkg-config --exists gtk+-3.0; then
-  echo "[*] Installing GTK3 dev packages (requires sudo)..."
+  echo "[*] Instalando GTK3 dev (sudo)..."
   sudo apt update
   sudo apt install -y libgtk-3-dev pkg-config
 fi
 
-echo "[*] Writing source..."
-cat > "${SRC_DIR}/main.c" <<'EOF'
-#include <gtk/gtk.h>
-#include <stdio.h>
-#include <string.h>
+# Verifica fonte
+if [[ ! -f "${SRC_FILE}" ]]; then
+  echo "[!] Fonte não encontrada: ${SRC_FILE}"
+  exit 1
+fi
 
-// ---------- Leitura de CPU/RAM ----------
-static double get_cpu_usage() {
-    static long prev_total = 0, prev_idle = 0;
-    FILE* fp = fopen("/proc/stat", "r");
-    if (!fp) return 0.0;
-    char lbl[5];
-    long user, nice, system, idle, iowait, irq, softirq;
-    if (fscanf(fp, "%4s %ld %ld %ld %ld %ld %ld %ld",
-               lbl, &user, &nice, &system, &idle, &iowait, &irq, &softirq) != 8) {
-        fclose(fp); return 0.0;
-    }
-    fclose(fp);
-    long total = user + nice + system + idle + iowait + irq + softirq;
-    long diff_total = total - prev_total;
-    long diff_idle  = idle  - prev_idle;
-    double usage = (diff_total > 0) ? 100.0 * (diff_total - diff_idle) / diff_total : 0.0;
-    prev_total = total; prev_idle = idle;
-    return usage;
-}
+echo "[*] Copiando fonte..."
+cp -f "${SRC_FILE}" "${SRC_DIR}/main.c"
 
-static double get_mem_percent() {
-    FILE* fp = fopen("/proc/meminfo", "r");
-    if (!fp) return 0.0;
-    long total=0, available=0;
-    char key[64]; long val; char kb[8];
-    while (fscanf(fp, "%63s %ld %7s\n", key, &val, kb) == 3) {
-        if (strcmp(key, "MemTotal:") == 0) total = val;
-        else if (strcmp(key, "MemAvailable:") == 0) available = val;
-        if (total && available) break;
-    }
-    fclose(fp);
-    if (!total) return 0.0;
-    return 100.0 * (double)(total - available) / (double)total;
-}
+echo "[*] Compilando..."
+# -O2 otimiza; -s remove símbolos; -lm por causa de math.h (round/floor, etc.)
+gcc "${SRC_DIR}/main.c" -o "${BIN_PATH}" $(pkg-config --cflags --libs gtk+-3.0) -O2 -s -lm
 
-// ---------- UI ----------
-typedef struct {
-    GtkWidget *window;
-    GtkWidget *label;
-    int margin;
-} UiCtx;
-
-static void position_top_right_primary(UiCtx *ctx) {
-    GdkDisplay *display = gdk_display_get_default();
-    if (!display) return;
-    GdkMonitor *mon = gdk_display_get_primary_monitor(display);
-    if (!mon) return;
-
-    GtkAllocation a; gtk_widget_get_allocation(ctx->window, &a);
-    GdkRectangle r; gdk_monitor_get_geometry(mon, &r);
-    int x = r.x + r.width  - a.width  - ctx->margin;
-    int y = r.y + ctx->margin;
-    gtk_window_move(GTK_WINDOW(ctx->window), x, y);
-}
-
-static gboolean on_size_allocate(GtkWidget *w, GdkRectangle *alloc, gpointer user_data) {
-    position_top_right_primary((UiCtx*)user_data);
-    return FALSE;
-}
-
-static gboolean update_stats(gpointer user_data) {
-    UiCtx *ctx = (UiCtx*)user_data;
-    char text[128];
-    g_snprintf(text, sizeof(text), "💻 CPU: %.1f%%\n🧠 RAM: %.1f%%",
-               get_cpu_usage(), get_mem_percent());
-    gtk_label_set_text(GTK_LABEL(ctx->label), text);
-    return TRUE;
-}
-
-int main(int argc, char *argv[]) {
-    gtk_init(&argc, &argv);
-
-    UiCtx ui = {0};
-    ui.margin = 10;
-
-    ui.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(ui.window), "Monitoring HUD");
-    gtk_window_set_decorated(GTK_WINDOW(ui.window), FALSE);
-    gtk_window_set_keep_above(GTK_WINDOW(ui.window), TRUE);
-    gtk_window_set_resizable(GTK_WINDOW(ui.window), FALSE);
-    gtk_window_set_skip_taskbar_hint(GTK_WINDOW(ui.window), TRUE);
-    gtk_window_set_skip_pager_hint(GTK_WINDOW(ui.window), TRUE);
-    gtk_widget_set_app_paintable(ui.window, TRUE);
-    gtk_widget_set_opacity(ui.window, 0.85);
-
-    // On-top forte / dock-like e sem foco
-    gtk_window_set_type_hint(GTK_WINDOW(ui.window), GDK_WINDOW_TYPE_HINT_DOCK);
-    gtk_window_stick(GTK_WINDOW(ui.window));
-    gtk_window_set_accept_focus(GTK_WINDOW(ui.window), FALSE);
-    gtk_window_set_focus_on_map(GTK_WINDOW(ui.window), FALSE);
-    gtk_widget_set_can_focus(ui.window, FALSE);
-
-    // RGBA (transparência verdadeira, se disponível)
-    GdkScreen *screen = gdk_screen_get_default();
-    if (screen) {
-        GdkVisual *visual = gdk_screen_get_rgba_visual(screen);
-        if (visual) gtk_widget_set_visual(ui.window, visual);
-    }
-
-    // CSS
-    GtkCssProvider *prov = gtk_css_provider_new();
-    const char *css =
-        "window { background-color: rgba(0,0,0,0.0); }"
-        "label { font: 11pt \"FiraCode Nerd Font\", Monospace; color: #FFFFFF; }";
-    gtk_css_provider_load_from_data(prov, css, -1, NULL);
-    gtk_style_context_add_provider_for_screen(screen,
-        GTK_STYLE_PROVIDER(prov), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-    g_object_unref(prov);
-
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
-    gtk_container_add(GTK_CONTAINER(ui.window), box);
-
-    ui.label = gtk_label_new("Carregando...");
-    gtk_label_set_justify(GTK_LABEL(ui.label), GTK_JUSTIFY_LEFT);
-    gtk_box_pack_start(GTK_BOX(box), ui.label, TRUE, TRUE, 0);
-
-    g_signal_connect(ui.window, "size-allocate", G_CALLBACK(on_size_allocate), &ui);
-
-    g_timeout_add(1000, update_stats, &ui);
-    update_stats(&ui);
-
-    gtk_widget_show_all(ui.window);
-    gtk_main();
-    return 0;
-}
-
-EOF
-
-echo "[*] Building..."
-gcc "${SRC_DIR}/main.c" -o "${BIN_PATH}" `pkg-config --cflags --libs gtk+-3.0`
-
-echo "[*] Creating autostart entry..."
+echo "[*] Criando entrada de autostart..."
 cat > "${DESKTOP_PATH}" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Monitoring HUD
-Comment=Transparent CPU/RAM overlay at top right
-Exec=${BIN_PATH}
+Comment=Overlay transparente de CPU/RAM/TMP/GPU
+Exec=${BIN_PATH} --click-through
 Icon=utilities-system-monitor
 Terminal=false
 X-GNOME-Autostart-enabled=true
@@ -176,8 +58,14 @@ EOF
 
 chmod +x "${BIN_PATH}" "${DESKTOP_PATH}"
 
-echo "[*] Launching now..."
+echo "[*] Iniciando agora..."
+# Mata instância antiga (sua versão suporta --kill/--restart)
+if "${BIN_PATH}" --kill >/dev/null 2>&1; then
+  sleep 0.2
+fi
 nohup "${BIN_PATH}" >/dev/null 2>&1 &
 
-echo "[✓] Installed! Binary: ${BIN_PATH} | Autostart: ${DESKTOP_PATH}"
-echo "    It will start automatically on next login."
+echo "[✓] Instalado!"
+echo "    Binário:   ${BIN_PATH}"
+echo "    Autostart: ${DESKTOP_PATH}"
+echo "    Ele iniciará automaticamente no próximo login."
